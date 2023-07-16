@@ -8,6 +8,7 @@ import {DSCEngine} from "src/DSCEngine.sol";
 import {HelperConfig} from "script/HelperConfig.s.sol";
 import {DeployDSC} from "script/DeployDSC.s.sol";
 import {ERC20Mock} from "test/mocks/ERC20Mock.sol";
+import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 
 contract DSCEngineTest is Test {
     DeployDSC deployer;
@@ -20,15 +21,20 @@ contract DSCEngineTest is Test {
     address weth;
 
     address USER = makeAddr("user");
+    address LIQUIDATE_CALLER = makeAddr("liquidator user");
+
     uint256 public constant AMOUNT_COLLATERAL = 10 ether;
-    uint256 public constant STARTING_ERC20_BALANCE = 10 ether;
+    uint256 public constant STARTING_ERC20_BALANCE = 1e10 ether;
+    uint256 constant AMMOUNT_MINTED_DSC = 1e18 * 10000; // 5e18
+    uint256 constant UNDERCOLLATERALIZED_ETH_PRICE = 1200e8; //default is 2000 $ = 2000e8    300.000000000000000030
+    uint256 amountToMint = 100 ether;
 
     function setUp() public {
         deployer = new DeployDSC();
         (dsc, dsce, config) = deployer.run();
         (ethUsdPriceFeed, btcUsdPriceFeed, weth,,) = config.activeNetworkConfig();
 
-        ERC20Mock(weth).mint(USER, STARTING_ERC20_BALANCE);
+        ERC20Mock(weth).mint(USER, STARTING_ERC20_BALANCE * 2000);
     }
 
     ////////////////////////////
@@ -107,7 +113,6 @@ contract DSCEngineTest is Test {
     ////////////////////////////
 
     function testCanMintDsc() public depositedCollateral {
-        uint256 amountToMint = 100 ether;
         vm.startPrank(USER);
         dsce.mintDsc(amountToMint);
         vm.stopPrank();
@@ -116,18 +121,14 @@ contract DSCEngineTest is Test {
         assertEq(userBalance, amountToMint);
     }
 
-    //health broken before minting dsc
     function testIfMintDscRevertsIfHealthFactorIsBroken() public depositedCollateral {
         vm.startPrank(USER);
 
         //user deposited 10 eth
         //user mints 9.99 eth
         //health is 10000.00000000000000500
-        console.log("health before mint", dsce.getHealthFactor(USER));
-        console.log("dsc before mint", dsc.balanceOf(USER));
-        console.log("collateral before mint", dsce.getAccountCollateralValue(USER));
 
-        uint256 amountToMint = dsce.getAccountCollateralValue(USER);
+        amountToMint = dsce.getAccountCollateralValue(USER);
         vm.expectRevert(DSCEngine.DSCEngine__BreaksHealthFactor.selector);
 
         dsce.mintDsc(amountToMint); //in usd
@@ -135,6 +136,62 @@ contract DSCEngineTest is Test {
         vm.stopPrank();
     }
 
-    //1000000000000000000
-    //maybe test health broken after minting dsc
+    function testcanDepositCollateralAndMintDsc() public {
+        vm.startPrank(USER);
+
+        ERC20Mock(weth).approve(address(dsce), AMOUNT_COLLATERAL);
+        dsce.depositCollateralAndMintDsc(weth, AMOUNT_COLLATERAL, AMOUNT_COLLATERAL / 3);
+        vm.stopPrank();
+
+        (uint256 totalDscMinted, uint256 collateralValueInUsd) = dsce.getAccountInformation(USER);
+
+        assertEq(totalDscMinted, AMOUNT_COLLATERAL / 3);
+        assertEq(dsce.getTokenAmountFromUsd(weth, collateralValueInUsd), AMOUNT_COLLATERAL);
+    }
+    ////////////////////////////
+    //       Liquidate        //
+    ////////////////////////////
+
+    modifier depositedCollateralAndMintedDsc(address user) {
+        vm.startPrank(user);
+
+        ERC20Mock(weth).approve(address(dsce), AMOUNT_COLLATERAL);
+
+        // 1 eth * 200% > 2000$
+        // 20 eth / 2000 = 40 000 / 2000 = 20 ---> collateral
+        // 10 ----> mintedDsc
+        dsce.depositCollateralAndMintDsc(weth, (AMOUNT_COLLATERAL * 2) / 2000, AMOUNT_COLLATERAL - 1); //collateral is in eth
+
+        vm.stopPrank();
+        _;
+    }
+
+    function testIfInsolventCanBeLiquidated() public depositedCollateralAndMintedDsc(USER) {
+        //become undercollateralized (reduce collateral value)
+        (bool success,) =
+            ethUsdPriceFeed.call(abi.encodeWithSignature("updateAnswer(int256)", UNDERCOLLATERALIZED_ETH_PRICE));
+        assert(success);
+
+        //create second user
+        ERC20Mock(weth).mint(LIQUIDATE_CALLER, STARTING_ERC20_BALANCE);
+
+        vm.startPrank(LIQUIDATE_CALLER);
+
+        dsc.approve(address(dsce), AMOUNT_COLLATERAL); //let engine get dsc
+        ERC20Mock(weth).approve(address(dsce), AMOUNT_COLLATERAL * 1e5); //let engine get collateral
+        dsce.depositCollateral(weth, AMOUNT_COLLATERAL * 1e5);
+
+        dsce.mintDsc(AMOUNT_COLLATERAL * 1e2);
+
+        //Liquidate
+        console.log("dsc liq", dsce.getDscValue(LIQUIDATE_CALLER));
+        console.log("collateral liq", dsce.getAccountCollateralValue(LIQUIDATE_CALLER));
+        console.log("health liq", dsce.getHealthFactor(LIQUIDATE_CALLER));
+
+        dsce.liquidate(weth, USER, AMOUNT_COLLATERAL - 1); // not running because USER doesnt have enough collateral
+
+        vm.stopPrank();
+
+        //check if became liquidated
+    }
 }
