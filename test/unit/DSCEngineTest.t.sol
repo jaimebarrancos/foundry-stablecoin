@@ -24,7 +24,7 @@ contract DSCEngineTest is Test {
     address LIQUIDATE_CALLER = makeAddr("liquidator user");
 
     uint256 public constant AMOUNT_COLLATERAL = 10 ether;
-    uint256 public constant STARTING_ERC20_BALANCE = 1e10 ether;
+    uint256 public constant STARTING_ERC20_BALANCE = 1e10 ether * 2000;
     uint256 constant AMMOUNT_MINTED_DSC = 1e18 * 10000; // 5e18
     uint256 constant UNDERCOLLATERALIZED_ETH_PRICE = 1200e8; //default is 2000 $ = 2000e8    300.000000000000000030
     uint256 amountToMint = 100 ether;
@@ -34,7 +34,7 @@ contract DSCEngineTest is Test {
         (dsc, dsce, config) = deployer.run();
         (ethUsdPriceFeed, btcUsdPriceFeed, weth,,) = config.activeNetworkConfig();
 
-        ERC20Mock(weth).mint(USER, STARTING_ERC20_BALANCE * 2000);
+        ERC20Mock(weth).mint(USER, STARTING_ERC20_BALANCE);
     }
 
     ////////////////////////////
@@ -74,7 +74,6 @@ contract DSCEngineTest is Test {
     ////////////////////////////
     //  Deposit collateral    //
     ////////////////////////////
-
     function testRevertIfCollateralZero() public {
         vm.startPrank(USER);
         ERC20Mock(weth).approve(address(dsce), AMOUNT_COLLATERAL);
@@ -111,7 +110,6 @@ contract DSCEngineTest is Test {
     ////////////////////////////
     //       Mint Dsc         //
     ////////////////////////////
-
     function testCanMintDsc() public depositedCollateral {
         vm.startPrank(USER);
         dsce.mintDsc(amountToMint);
@@ -191,7 +189,29 @@ contract DSCEngineTest is Test {
         dsce.liquidate(weth, USER, AMOUNT_COLLATERAL - 1); // not running because USER doesnt have enough collateral
 
         vm.stopPrank();
+    }
 
-        //check if became liquidated
+    ////////////////////////////////////
+    //   DecentralizedStableCoin      //
+    ////////////////////////////////////
+    function testNonOwnerCantBurnTokens() public {
+        vm.startPrank(USER);
+
+        vm.expectRevert(bytes("Ownable: caller is not the owner"));
+        dsc.burn(STARTING_ERC20_BALANCE);
+        vm.stopPrank();
+    }
+
+    ////////////////////////////
+    //    Deploy script       //
+    ////////////////////////////
+    function testViewFunctionAfterDeploy() public {
+        (dsc, dsce, config) = deployer.run();
+        (ethUsdPriceFeed, btcUsdPriceFeed, weth,,) = config.activeNetworkConfig();
+
+        vm.startPrank(USER);
+        uint256 ethPrice = dsce.getUsdValue(weth, 1);
+        vm.stopPrank();
+        assert(ethPrice == 2000);
     }
 }
